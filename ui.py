@@ -12,6 +12,15 @@ imp note: Make sure to run this with the virtual environment activated that has 
 on the scale lower than that the generate.py must be used...or tuning of ui.py must be done
 """
 
+"""
+most important note: this code is made to run on cpu because it was developed on Macbook Air m1 which has no cuda support. If you want to run it on gpu, 
+you may need to adjust the full_pipeline function to ensure that the embedding extraction runs on the gpu. Specifically, you would need to move the audio 
+tensor to the gpu before passing it to the model, and also ensure that the model itself is loaded onto the gpu. This would involve changing lines in the full_pipeline 
+function where the audio is processed and where the model is loaded. Additionally, make sure that your environment has access to a compatible GPU and that PyTorch is installed with CUDA support.
+"""
+
+
+
 import sys
 import os
 os.environ["QT_LOGGING_RULES"] = "*.warning=false;qt5ct.debug=false"
