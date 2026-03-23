@@ -21,6 +21,9 @@ function where the audio is processed and where the model is loaded. Additionall
 
 
 
+# second version  (or full_tts_gui_fixed_final_with_pause button )
+# Fixed: Added missing update_rec_label method
+
 import sys
 import os
 os.environ["QT_LOGGING_RULES"] = "*.warning=false;qt5ct.debug=false"
@@ -37,7 +40,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QFormLayout, QLabel, QLineEdit, QPushButton, QListWidget,
     QMessageBox, QGroupBox, QStatusBar, QTextEdit, QComboBox,
-    QSlider, QTabWidget
+    QSlider, QTabWidget, QFileDialog
 )
 from PyQt5.QtCore import QUrl, Qt, pyqtSignal, QObject
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
@@ -45,7 +48,7 @@ from PyQt5.QtGui import QFont
 
 import sounddevice as sd
 
-# ── embedding pipeline ────────────────────────────────────────
+# ── Your embedding pipeline ────────────────────────────────────────
 from model.pre_trained.ecapa_tdnn_loader import get_ECAPA_TDNN_MODEL, speaker_embedding_extractor
 from audio.tools import trim_silence
 
@@ -88,7 +91,7 @@ class RecorderSignals(QObject):
 class TTSApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Voice Cloning - Dataset + Synthesis")
+        self.setWindowTitle("Voice cloning System")
         self.resize(1050, 820)
 
         os.makedirs("createdataset", exist_ok=True)
@@ -99,6 +102,8 @@ class TTSApp(QMainWindow):
         self.sample_rate   = 44100
         self.start_t       = 0
         self.record_thread = None
+
+        self.selected_audio_file = None
 
         self.rec_signals = RecorderSignals()
         self.rec_signals.update_time.connect(self.update_rec_label)
@@ -122,17 +127,29 @@ class TTSApp(QMainWindow):
         tab_rec = QWidget()
         lay_rec = QVBoxLayout(tab_rec)
 
-        g_rec = QGroupBox(" 1. Record new speaker (microphone) ")
+        g_rec = QGroupBox(" 1. Record new speaker or use existing audio ")
         f_rec = QFormLayout()
 
         self.filename_edit = QLineEdit()
         self.filename_edit.setPlaceholderText("example: sandip_new_01")
-        f_rec.addRow("Raw filename (saved in createdataset/):", self.filename_edit)
+        f_rec.addRow("Filename (for new speaker):", self.filename_edit)
+
+        browse_row = QHBoxLayout()
+        self.btn_browse = QPushButton("📂 Browse existing audio file")
+        self.btn_browse.clicked.connect(self.browse_audio_file)
+        browse_row.addWidget(self.btn_browse)
+
+        self.lbl_source = QLabel("No source selected")
+        self.lbl_source.setStyleSheet("color: #666; font-style: italic;")
+        browse_row.addWidget(self.lbl_source)
+        browse_row.addStretch()
+
+        f_rec.addRow(browse_row)
 
         btnrow = QHBoxLayout()
-        self.btn_start = QPushButton("▶ Start Recording")
+        self.btn_start = QPushButton("▶ Start Recording (mic)")
         self.btn_start.clicked.connect(self.start_rec)
-        self.btn_stop  = QPushButton("■ Stop & Generate Embedding")
+        self.btn_stop  = QPushButton(" Generate Embedding")
         self.btn_stop.clicked.connect(self.stop_rec)
         self.btn_stop.setEnabled(False)
         btnrow.addWidget(self.btn_start)
@@ -157,6 +174,7 @@ class TTSApp(QMainWindow):
 
         self.lst_speakers = QListWidget()
         self.lst_speakers.itemDoubleClicked.connect(self.on_speaker_doubleclick)
+        self.lst_speakers.itemSelectionChanged.connect(self.on_speaker_selection_changed)
         v_spk.addWidget(self.lst_speakers)
 
         h_btn = QHBoxLayout()
@@ -168,10 +186,25 @@ class TTSApp(QMainWindow):
         h_btn.addWidget(btn_play)
         v_spk.addLayout(h_btn)
 
+        self.btn_pause_listen = QPushButton("⏯ Pause / Resume Listening")
+        self.btn_pause_listen.clicked.connect(self.toggle_pause_listen)
+        self.btn_pause_listen.setEnabled(False)
+        v_spk.addWidget(self.btn_pause_listen)
+
         self.txt_details = QTextEdit(readOnly=True)
         self.txt_details.setMaximumHeight(160)
         v_spk.addWidget(QLabel("Embedding Details:"))
         v_spk.addWidget(self.txt_details)
+
+        v_spk.addWidget(QLabel("Speaker Note / Description (also shown in list on the right):"))
+        self.txt_note = QTextEdit()
+        self.txt_note.setMaximumHeight(80)
+        self.txt_note.setPlaceholderText("Add a note or description for this speaker. It will be displayed in the list for easy reference.")
+        v_spk.addWidget(self.txt_note)
+
+        btn_save_note = QPushButton(" Save Note for this speaker")
+        btn_save_note.clicked.connect(self.save_speaker_note)
+        v_spk.addWidget(btn_save_note)
 
         g_spk.setLayout(v_spk)
         lay_spk.addWidget(g_spk)
@@ -215,7 +248,6 @@ class TTSApp(QMainWindow):
         self.log_syn.setMaximumHeight(140)
         f_syn.addRow("Synthesis Log:", self.log_syn)
 
-        # ── Added: Playback Controls ────────────────────────────────
         playback_row = QHBoxLayout()
         self.btn_play_pause = QPushButton("▶ Play / ⏸ Pause")
         self.btn_play_pause.clicked.connect(self.toggle_play_pause)
@@ -235,25 +267,44 @@ class TTSApp(QMainWindow):
         lay_syn.addWidget(g_syn)
         tabs.addTab(tab_syn, "Synthesize")
 
-        # Status bar
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.showMessage("Ready - make sure venv is active")
 
-    # ── New method: Toggle Play / Pause ─────────────────────────────
-    def toggle_play_pause(self):
-        state = self.player.state()
-        if state == QMediaPlayer.PlayingState:
-            self.player.pause()
-            self.btn_play_pause.setText("▶ Resume")
-        else:
-            self.player.play()
-            self.btn_play_pause.setText("⏸ Pause")
+    def update_rec_label(self, sec):
+        self.lbl_rec.setText(f"Recording... {sec:.1f} s")
 
-    # ── Recording Logic ──────────────────────────────────────────────
+    def show_rec_error(self, msg):
+        QMessageBox.critical(self, "Recording Error", msg)
+        self.reset_rec_ui()
+
+    def browse_audio_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select audio file for speaker embedding",
+            "",
+            "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a *.aac)"
+        )
+        if file_path:
+            self.selected_audio_file = file_path
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            self.filename_edit.setText(base_name.replace(" ", "_").lower())
+            self.lbl_source.setText(f"Using file: {os.path.basename(file_path)}")
+            self.lbl_rec.setText("Ready to generate embedding")
+            self.lbl_rec.setStyleSheet("font-size:15px; font-weight:bold; color:#2e7d32;")
+            self.btn_stop.setEnabled(True)
+            self.btn_start.setEnabled(False)
+        else:
+            self.lbl_source.setText("No source selected")
+
     def start_rec(self):
         if not self.filename_edit.text().strip():
             QMessageBox.warning(self, "Input required", "Please enter a filename first.")
+            return
+
+        if self.selected_audio_file:
+            QMessageBox.information(self, "File already selected", 
+                "You have selected an existing file.\nUse 'Stop & Generate' to process it.")
             return
 
         self.audio_chunks = []
@@ -282,13 +333,6 @@ class TTSApp(QMainWindow):
         except Exception as e:
             self.rec_signals.error_message.emit(str(e))
 
-    def update_rec_label(self, sec):
-        self.lbl_rec.setText(f"Recording... {sec:.1f} s")
-
-    def show_rec_error(self, msg):
-        QMessageBox.critical(self, "Recording Error", msg)
-        self.reset_rec_ui()
-
     def stop_rec(self):
         self.recording = False
         self.lbl_rec.setText("Processing...")
@@ -297,29 +341,50 @@ class TTSApp(QMainWindow):
         if self.record_thread and self.record_thread.is_alive():
             self.record_thread.join(timeout=5)
 
-        if not self.audio_chunks:
+        name = self.filename_edit.text().strip()
+        if not name:
             self.reset_rec_ui()
+            QMessageBox.warning(self, "Error", "Filename cannot be empty.")
             return
 
-        name = self.filename_edit.text().strip()
         raw_path = os.path.join("createdataset", f"{name}.wav")
-        arr = np.concatenate(self.audio_chunks, axis=0)
-        torchaudio.save(raw_path, torch.from_numpy(arr.T).float(), self.sample_rate)
+
+        if self.selected_audio_file:
+            try:
+                audio, sr = torchaudio.load(self.selected_audio_file)
+                if sr != self.sample_rate:
+                    resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
+                    audio = resampler(audio)
+                if audio.shape[0] > 1:
+                    audio = audio.mean(dim=0, keepdim=True)
+                torchaudio.save(raw_path, audio, self.sample_rate)
+                self.lbl_rec.setText("File copied & ready")
+            except Exception as e:
+                QMessageBox.critical(self, "File Error", f"Cannot process file:\n{str(e)}")
+                self.reset_rec_ui()
+                return
+        else:
+            if not self.audio_chunks:
+                self.reset_rec_ui()
+                return
+            arr = np.concatenate(self.audio_chunks, axis=0)
+            torchaudio.save(raw_path, torch.from_numpy(arr.T).float(), self.sample_rate)
 
         sid = self.next_speaker_id()
 
         try:
             pw, pt, _ = full_pipeline(raw_path, sid)
             QMessageBox.information(self, "Success",
-                f"Speaker {sid} created successfully!\n\n"
-                f"Raw audio     : {raw_path}\n"
-                f"Processed wav : {pw}\n"
-                f"Embedding     : {pt}")
+                f"Speaker {sid} created!\n\n"
+                f"Raw: {raw_path}\nProcessed: {pw}\nEmbedding: {pt}")
             self.refresh_speakers()
         except Exception as e:
             QMessageBox.critical(self, "Pipeline Error", str(e))
 
         self.reset_rec_ui()
+        self.selected_audio_file = None
+        self.lbl_source.setText("No source selected")
+        self.btn_start.setEnabled(True)
 
     def reset_rec_ui(self):
         self.btn_start.setEnabled(True)
@@ -327,6 +392,49 @@ class TTSApp(QMainWindow):
         self.lbl_rec.setText("Ready")
         self.lbl_rec.setStyleSheet("font-size:15px; font-weight:bold; color:#444;")
         self.audio_chunks = []
+
+    def toggle_play_pause(self):
+        state = self.player.state()
+        if state == QMediaPlayer.PlayingState:
+            self.player.pause()
+            self.btn_play_pause.setText("▶ Resume")
+        else:
+            self.player.play()
+            self.btn_play_pause.setText("⏸ Pause")
+
+    def toggle_pause_listen(self):
+        state = self.player.state()
+        if state == QMediaPlayer.PlayingState:
+            self.player.pause()
+            self.btn_pause_listen.setText("▶ Resume Listening")
+        else:
+            self.player.play()
+            self.btn_pause_listen.setText("⏸ Pause Listening")
+
+    def play_processed(self, sid):
+        p = os.path.join("embeddings/LibriTTS", f"{sid}_processed.wav")
+        if os.path.exists(p):
+            url = QUrl.fromLocalFile(os.path.abspath(p))
+            self.player.setMedia(QMediaContent(url))
+            self.player.play()
+            self.btn_pause_listen.setText("⏸ Pause Listening")
+            self.btn_pause_listen.setEnabled(True)
+        else:
+            print(f"Processed file not found: {p}")
+            self.btn_pause_listen.setEnabled(False)
+
+    def play_last_generated(self):
+        if not self.last_synthesized_file or not os.path.exists(self.last_synthesized_file):
+            QMessageBox.information(self, "No file", "No recent synthesis found.")
+            return
+
+        url = QUrl.fromLocalFile(os.path.abspath(self.last_synthesized_file))
+        self.player.setMedia(QMediaContent(url))
+        self.player.play()
+        self.btn_play_pause.setText("⏸ Pause")
+        self.btn_pause_listen.setText("⏸ Pause Listening")
+        self.btn_pause_listen.setEnabled(True)
+        self.status.showMessage(f"Playing: {os.path.basename(self.last_synthesized_file)}")
 
     def next_speaker_id(self):
         folder = "embeddings/LibriTTS"
@@ -339,7 +447,6 @@ class TTSApp(QMainWindow):
                     pass
         return str(max(nums) + 1) if nums else "1"
 
-    # ── Speakers List ────────────────────────────────────────────────
     def refresh_speakers(self):
         self.lst_speakers.clear()
         self.cmb_speaker.clear()
@@ -350,13 +457,38 @@ class TTSApp(QMainWindow):
 
         for f in pts:
             sid = os.path.splitext(f)[0]
+            note = self.get_speaker_note(sid)
             item_text = f"Speaker {sid}   •   {f}   •   {sid}_processed.wav"
+            if note:
+                item_text += f"     {note}"
             self.lst_speakers.addItem(item_text)
             self.cmb_speaker.addItem(sid)
+
+    def get_speaker_note(self, sid):
+        note_path = os.path.join("embeddings/LibriTTS", f"{sid}.txt")
+        if os.path.exists(note_path):
+            try:
+                with open(note_path, "r", encoding="utf-8") as f:
+                    text = f.read().strip()
+                    if text:
+                        return text
+            except:
+                pass
+        return ""
+
+    def on_speaker_selection_changed(self):
+        item = self.lst_speakers.currentItem()
+        if not item:
+            self.txt_note.clear()
+            self.btn_pause_listen.setEnabled(False)
+            return
+        sid = item.text().split()[1]
+        self.txt_note.setPlainText(self.get_speaker_note(sid))
 
     def on_speaker_doubleclick(self, item):
         sid = item.text().split()[1]
         self.show_speaker_info(sid)
+        self.txt_note.setPlainText(self.get_speaker_note(sid))
 
     def show_speaker_info(self, sid):
         path = os.path.join("embeddings/LibriTTS", f"{sid}.pt")
@@ -364,24 +496,45 @@ class TTSApp(QMainWindow):
             return
 
         emb = torch.load(path)
-        info = f"<b>Speaker ID:</b> {sid}<br>" \
-               f"<b>Embedding shape:</b> {emb.shape}<br>" \
-               f"<b>min / max:</b> {emb.min():.6f} / {emb.max():.6f}<br>" \
-               f"<b>L2 norm:</b> {emb.norm():.6f}<br><br>" \
-               f"First 20 values: {emb[0][:20].tolist()}"
+        note = self.get_speaker_note(sid)
+
+        info = f"<b>Speaker ID:</b> {sid}<br>"
+        if note:
+            info += f"<b>Note:</b> {note.replace('\n', '<br>')}<br><br>"
+        info += (
+            f"<b>Embedding shape:</b> {emb.shape}<br>"
+            f"<b>min / max:</b> {emb.min():.6f} / {emb.max():.6f}<br>"
+            f"<b>L2 norm:</b> {emb.norm():.6f}<br><br>"
+            f"First 20 values: {emb[0][:20].tolist()}"
+        )
         self.txt_details.setHtml(info)
 
         self.play_processed(sid)
 
-    def play_processed(self, sid):
-        p = os.path.join("embeddings/LibriTTS", f"{sid}_processed.wav")
-        if os.path.exists(p):
-            url = QUrl.fromLocalFile(os.path.abspath(p))
-            self.player.setMedia(QMediaContent(url))
-            self.player.play()
-            self.btn_play_pause.setText("⏸ Pause")  # reset button text
-        else:
-            print(f"Processed file not found: {p}")
+    def save_speaker_note(self):
+        item = self.lst_speakers.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No speaker", "Select a speaker first.")
+            return
+
+        sid = item.text().split()[1]
+        note_path = os.path.join("embeddings/LibriTTS", f"{sid}.txt")
+        text = self.txt_note.toPlainText().strip()
+
+        if not text:
+            if os.path.exists(note_path):
+                os.remove(note_path)
+                QMessageBox.information(self, "Note removed", f"Note for speaker {sid} deleted.")
+            self.refresh_speakers()
+            return
+
+        try:
+            with open(note_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            QMessageBox.information(self, "Saved", f"Note saved for speaker {sid}")
+            self.refresh_speakers()
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", str(e))
 
     def play_selected_sample(self):
         item = self.lst_speakers.currentItem()
@@ -389,7 +542,6 @@ class TTSApp(QMainWindow):
             sid = item.text().split()[1]
             self.play_processed(sid)
 
-    # ── Synthesis ────────────────────────────────────────────────────
     def generate_audio(self):
         speaker = self.cmb_speaker.currentText()
         text = self.txt_input.toPlainText().strip()
@@ -397,16 +549,16 @@ class TTSApp(QMainWindow):
             QMessageBox.warning(self, "Missing input", "Select a speaker and enter text.")
             return
 
-        p_val = self.slider_pitch.value()    / 10.0
-        e_val = self.slider_energy.value()   / 10.0
+        p_val = self.slider_pitch.value() / 10.0
+        e_val = self.slider_energy.value() / 10.0
         d_val = self.slider_duration.value() / 10.0
 
         self.log_syn.clear()
         self.log_syn.append("Starting synthesis...")
 
         cmd = [
-            sys.executable, "generate.py",
-            "--restore_step", "450000",
+            sys.executable, "synthesize6.py",
+            "--restore_step", "500000",
             "--mode", "single",
             "--text", text,
             "--speaker_emb", f"embeddings/LibriTTS/{speaker}.pt",
@@ -440,25 +592,14 @@ class TTSApp(QMainWindow):
                 self.log_syn.append(f"\n→ Detected new file: {os.path.basename(newest)}")
                 self.log_syn.append(f"   Full path: {newest}")
             else:
-                self.log_syn.append("\nNo new .wav detected in output/result/LibriTTS/")
+                self.log_syn.append("\nNo new .wav detected.")
 
             if result.returncode == 0:
-                self.log_syn.append("\nGeneration completed successfully ✓")
+                self.log_syn.append("\nGeneration completed ✓")
             else:
-                self.log_syn.append("\nGeneration failed ✗  (check log)")
+                self.log_syn.append("\nGeneration failed ✗")
         except Exception as ex:
             self.log_syn.append(f"\nException: {ex}")
-
-    def play_last_generated(self):
-        if not self.last_synthesized_file or not os.path.exists(self.last_synthesized_file):
-            QMessageBox.information(self, "No file", "No recent synthesis found or file missing.")
-            return
-
-        url = QUrl.fromLocalFile(os.path.abspath(self.last_synthesized_file))
-        self.player.setMedia(QMediaContent(url))
-        self.player.play()
-        self.btn_play_pause.setText("⏸ Pause")  # reset button text
-        self.status.showMessage(f"Playing: {os.path.basename(self.last_synthesized_file)}")
 
 
 if __name__ == "__main__":
