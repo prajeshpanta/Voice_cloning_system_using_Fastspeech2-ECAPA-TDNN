@@ -76,7 +76,7 @@ def preprocess_mandarin(text, preprocess_config):
 def load_speaker_embedding(embedding_path):
     if embedding_path.lower().endswith('.npy'):
         speaker_emb = np.load(embedding_path)
-    elif embedding_path.lower().endswith('.pt'):
+    elif embedding_path.lower().endswith('.pt') or embedding_path.lower().endswith('.ecapa'):
         speaker_emb = torch.load(embedding_path).cpu().numpy()
     else:
         raise ValueError("Unsupported embedding file format. Use .npy or .pt")
