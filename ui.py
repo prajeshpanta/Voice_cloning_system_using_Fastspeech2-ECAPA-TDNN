@@ -23,6 +23,7 @@ function where the audio is processed and where the model is loaded. Additionall
 
 # second version  (or full_tts_gui_fixed_final_with_pause button )
 # Fixed: Added missing update_rec_label method
+#final version has all the features ......
 
 import sys
 import os
